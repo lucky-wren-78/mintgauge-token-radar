@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>MintGauge — Pre-Token Launch Radar</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>MintGauge</h1>
+    <p class="tag">Pre-token launch radar — every protocol without a token, priced by a curve fitted on the snapshot's own traded tokens.</p>
+  </div>
+  <dl class="stats" id="stats"></dl>
+  <p class="seal" id="seal">Verifying page against board.json…</p>
+</header>
+
+<main>
+  <details class="panel" id="method">
+    <summary>How a value is built — model, holdout test, exclusion audit</summary>
+    <div class="method-grid">
+      <section>
+        <h2>The model</h2>
+        <p id="model-text"></p>
+        <div id="scatter" role="img" aria-label="Log-log scatter of traded protocols: market cap against TVL, with the fitted curve"></div>
+      </section>
+      <section>
+        <h2>Out-of-sample test (printed, not promised)</h2>
+        <table class="mini" id="holdout"></table>
+        <p class="note">25 repeated 80/20 holdouts on the 128 traded protocols. A miss of ×3.55 means the typical estimate lands within a factor of 3.55 of the real market cap. The flat multiple is what a single TVL multiplier scores on the same splits.</p>
+        <h2>Why the bands are wide</h2>
+        <p class="note">Each row's band is the interquartile range of cross-fitted model residuals — it includes real residual dispersion, not just parameter wobble. Bootstrap-only bands (about ×2.2 wide) would look tidier and be wrong; the holdout says the honest spread is this one. The wider P10–P90 range is in each protocol's detail view.</p>
+      </section>
+      <section>
+        <h2>From 758 protocols to this board</h2>
+        <table class="mini" id="exclusions"></table>
+        <h2>Category premiums (shrunk toward 1.00)</h2>
+        <div id="premiums" class="premiums"></div>
+      </section>
+    </div>
+  </details>
+
+  <div class="toolbar" role="search">
+    <div class="tabs" role="tablist" aria-label="Board view">
+      <button type="button" role="tab" aria-selected="true" id="tab-pre" data-view="pre">Pre-token board</button>
+      <button type="button" role="tab" aria-selected="false" id="tab-live" data-view="live">Live comps (traded)</button>
+    </div>
+    <label class="fld">Search
+      <input type="search" id="q" placeholder="protocol, category, chain…" autocomplete="off">
+    </label>
+    <label class="fld">Category
+      <select id="cat"><option value="">All categories</option></select>
+    </label>
+    <label class="fld">Farm verdict
+      <select id="verd">
+        <option value="">Any verdict</option><option>FARM</option><option>MARGINAL</option><option>SKIP</option>
+      </select>
+    </label>
+    <p class="shown" id="shown" role="status"></p>
+  </div>
+
+  <div class="tablewrap" role="region" aria-labelledby="boardcap" tabindex="0">
+    <table id="board">
+      <caption id="boardcap">Pre-token protocols ranked by implied launch value</caption>
+      <thead id="thead"></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</main>
+
+<footer>
+  <p>Data: sealed DefiLlama snapshot dated <span id="asof"></span> from the bounty kit. Values are model estimates with stated uncertainty, not predictions. Farm plans are checklists with explicit costs, times and exit rules — not financial advice.</p>
+</footer>
+
+<dialog id="detail" aria-labelledby="d-name" closedby="any">
+  <div class="d-head">
+    <div>
+      <h2 id="d-name"></h2>
+      <p class="d-sub" id="d-sub"></p>
+    </div>
+    <form method="dialog"><button class="close" aria-label="Close detail">×</button></form>
+  </div>
+  <div class="d-body" id="d-body"></div>
+</dialog>
+
+<script src="model-data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
