@@ -38,23 +38,30 @@ uncertainty.
 
 ## Farm plans
 
-Every row ships a six-step farm plan derived from that protocol's own
-category, chain, TVL tier and age: a safety-verification step first, then
-funding, the category's core action at a stated capital size, a weekly
-qualifying action, a hold-and-monitor step quoting the protocol's actual
-7-day TVL change, and a quantitative exit rule. Each step states its cost
-and its time. A transparent score (TVL vs the $50M floor, age, 7-day
-momentum) gives each plan a verdict: FARM (16 rows), MARGINAL (67) or
-SKIP (115).
+Every row ships an eight-step farm plan derived from that protocol's own
+category, chains, TVL tier, age and 7-day trend: a safety-verification
+step first, then funding, a tranched entry (half now, half after a week —
+the second tranche is conditional on the protocol's actual trend), the
+category's core and weekly qualifying actions, a hold-and-monitor step,
+a claim step, and a quantitative exit rule with capital rotation. Each
+step states its cost and its time, and each row carries the plan's
+working capital and estimated cash cost, so the detail view can net the
+plan against a token drop (3.5% / 7% / 14% of a $1,000 or $10,000
+position) after costs. A transparent score (TVL vs the $50M floor, age,
+7-day momentum) gives each plan a verdict: FARM (16 rows), MARGINAL (67)
+or SKIP (115).
 
 ## The dashboard
 
 A static page — vanilla HTML/CSS/JS, no framework, no network — with a
-dark OKLCH theme. It re-derives every number it shows from `board.json`
+dark OKLCH theme. The holdout results are printed in a validation strip
+above the board, not buried in a footnote. It re-derives every number it
+shows from `board.json`
 and prints a self-verification seal (row count, rank sequence, total,
 SHA-256 of the board) so the page and the file can be checked against
 each other at a glance. Board, per-protocol detail (value waterfall,
-bands, nearest traded comparables, farm plan) and a live-comps reference
+bands with P10–P90 whiskers, nearest traded comparables, farm plan with
+its net-of-costs table) and a live-comps reference
 view; sortable, filterable by text, category and verdict.
 
 ## Run it

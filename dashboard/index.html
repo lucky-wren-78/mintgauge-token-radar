@@ -10,7 +10,7 @@
 <body>
 <header class="top">
   <div class="brand">
-    <h1>MintGauge</h1>
+    <h1>Mint<span class="acc">Gauge</span></h1>
     <p class="tag">Pre-token launch radar — every protocol without a token, priced by a curve fitted on the snapshot's own traded tokens.</p>
   </div>
   <dl class="stats" id="stats"></dl>
@@ -18,6 +18,11 @@
 </header>
 
 <main>
+  <section class="valstrip" aria-label="Out-of-sample validation">
+    <div class="valgrid" id="valstrip"></div>
+    <p class="valnote" id="valnote"></p>
+  </section>
+
   <details class="panel" id="method">
     <summary>How a value is built — model, holdout test, exclusion audit</summary>
     <div class="method-grid">

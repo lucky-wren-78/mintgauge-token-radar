@@ -57,6 +57,13 @@ function renderHead(board){
     ["Total implied value",fmt(total)],["Model holdout miss","×"+M.holdout.model_miss.toFixed(2)],
     ["Flat multiple miss","×"+M.holdout.flat_miss.toFixed(2)],["Snapshot date",M.as_of]];
   $("#stats").innerHTML=stats.map(([k,v])=>`<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("");
+  $("#valstrip").innerHTML=
+    [["Holdout miss — this model","×"+M.holdout.model_miss.toFixed(2),"median over "+M.holdout.repeats+" repeated 80/20 splits"],
+     ["Holdout miss — flat multiple","×"+M.holdout.flat_miss.toFixed(2),M.flat_multiple+"× TVL for every protocol, same splits"],
+     ["Estimates within ×2 of actual",M.holdout.model_within2+"%","flat multiple manages "+M.holdout.flat_within2+"%"],
+     ["Curve fitted on",M.n_calibration+" traded protocols","the snapshot's own already-traded tokens"]]
+    .map(([k,v,s])=>`<div><span class="vk">${esc(k)}</span><b>${esc(v)}</b><span class="vs">${esc(s)}</span></div>`).join("");
+  $("#valnote").textContent="Out-of-sample, printed — not promised: the model is refit on 80% of the traded protocols and scored on the held-out 20%, "+M.holdout.repeats+" times. Each row's band is the P25–P75 of cross-fitted residuals and the whiskers reach P10–P90 (also in every detail view), so the spread on the board is the spread the test actually measured.";
   $("#asof").textContent=M.as_of;
   $("#model-text").textContent=
     `Implied value = exp(${M.fit.intercept} + ${M.fit.slope} × ln TVL) × category premium. `+
@@ -114,7 +121,7 @@ function drawScatter(){
 const COLS=[
   {k:"rank",t:"Rank",num:1},{k:"name",t:"Protocol",num:0},{k:"tvl_usd",t:"TVL",num:1},
   {k:"change_7d",t:"7d",num:1},{k:"age_days",t:"Age",num:1},{k:"implied_value_usd",t:"Implied value",num:1},
-  {k:"band",t:"Band (IQR)",num:0},{k:"farm_verdict",t:"Farm",num:0}];
+  {k:"band",t:"Band P25–P75",num:0},{k:"farm_verdict",t:"Farm",num:0}];
 let bandMin=0, bandMax=1;
 function buildHead(){
   $("#thead").innerHTML="<tr>"+COLS.map(c=>{
@@ -131,6 +138,8 @@ function rowEl(r){
   const tr=document.createElement("tr");
   const lo=((Math.log(r.band_lo_usd)-bandMin)/(bandMax-bandMin)*100).toFixed(1);
   const hi=((Math.log(r.band_hi_usd)-bandMin)/(bandMax-bandMin)*100).toFixed(1);
+  const wlo=((Math.log(r.wide_lo_usd)-bandMin)/(bandMax-bandMin)*100).toFixed(1);
+  const whi=((Math.log(r.wide_hi_usd)-bandMin)/(bandMax-bandMin)*100).toFixed(1);
   const mid=((Math.log(r.implied_value_usd)-bandMin)/(bandMax-bandMin)*100).toFixed(1);
   const chg=r.change_7d==null?"—":`<span class="${r.change_7d>=0?"up":"down"}">${r.change_7d>=0?"▲":"▼"} ${pct(r.change_7d)}</span>`;
   tr.innerHTML=
@@ -140,7 +149,7 @@ function rowEl(r){
     `<td data-v="${r.tvl_usd}">${fmt(r.tvl_usd)}</td><td data-v="${r.change_7d==null?-1e9:r.change_7d}">${chg}</td>`+
     `<td data-v="${r.age_days==null?-1:r.age_days}">${ageTxt(r.age_days)}</td>`+
     `<td data-v="${r.implied_value_usd}"><b>${fmt(r.implied_value_usd)}</b></td>`+
-    `<td><span class="bandbar"><i style="left:${lo}%;width:${Math.max(hi-lo,1.5)}%"></i><b style="left:${mid}%"></b></span>`+
+    `<td><span class="bandbar"><s style="left:${wlo}%;width:${Math.max(whi-wlo,1)}%"></s><i style="left:${lo}%;width:${Math.max(hi-lo,1.5)}%"></i><b style="left:${mid}%"></b></span>`+
     `<span class="bandtxt">${fmt(r.band_lo_usd)} – ${fmt(r.band_hi_usd)}</span></td>`+
     `<td><span class="chip ${esc(r.farm_verdict)}">${esc(r.farm_verdict)}</span></td>`;
   tr.addEventListener("click",()=>openDetail(r));
@@ -208,6 +217,19 @@ function nearestComps(r){
   const d = c => Math.abs(Math.log(c.t / r.tvl_usd));
   return [...M.comps].sort((a, b) => d(a) - d(b)).slice(0, 3);
 }
+/* What a plan nets after its cash costs, at the winners' usual assumptions:
+   a token drop worth 3.5% / 7% / 14% of a $1,000 or $10,000 position. */
+function sensTable(r){
+  const shares=[0.035,0.07,0.14], poss=[1000,10000], cash=r.farm_cash_cost_usd;
+  let h=`<table class="mini sens"><tr><th>Drop share of position</th>`+
+    poss.map(p=>`<th>on ${fmtFull(p)}</th>`).join("")+`</tr>`;
+  for(const sh of shares){
+    h+=`<tr><td>${(sh*100).toFixed(1).replace(".0","")}%</td>`+poss.map(p=>{
+      const net=Math.round(p*sh-cash);
+      return `<td class="${net>=0?"pos":"neg"}">${net>=0?"+":"−"}${fmt(Math.abs(net))}</td>`; }).join("")+`</tr>`;
+  }
+  return h+`</table><p class="note">Net of this plan's ≈${fmtFull(cash)} cash costs if a token drop worth that share of the position's value lands. The working capital itself is separate and comes back on exit.</p>`;
+}
 function openDetail(r){
   $("#d-name").textContent=r.name;
   $("#d-sub").textContent=`Rank ${r.rank} of ${rows.length} · ${r.category||"—"} · ${(r.chains||[]).join(", ")}${r.watchlist?" · on the official watchlist":""}`;
@@ -225,16 +247,18 @@ function openDetail(r){
     `<dt>Band — wider P10–P90</dt><dd>${fmtFull(r.wide_lo_usd)} – ${fmtFull(r.wide_hi_usd)}</dd>`+
     `<dt>Rank range (200 bootstrap refits, P10–P90)</dt><dd>${r.rank_lo} – ${r.rank_hi}</dd></dl>`+
     `<h3>Nearest traded comparables</h3><div class="comps">${comps}</div>`+
-    `<h3>Farm plan — verdict <span class="chip ${esc(r.farm_verdict)}">${esc(r.farm_verdict)}</span></h3>`+
-    `<ol class="farm">${r.farm_steps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>`;
+    `<h3>Farm plan — ${r.farm_steps.length} steps · verdict <span class="chip ${esc(r.farm_verdict)}">${esc(r.farm_verdict)}</span></h3>`+
+    `<p class="planecon">Working capital <b>${fmtFull(r.farm_capital_usd)}</b> (returned on exit) · cash costs ≈ <b>${fmtFull(r.farm_cash_cost_usd)}</b> · upkeep 15 min/week</p>`+
+    sensTable(r)+
+    `<ol class="farm">${r.farm_steps.map(s=>`<li>${esc(s).replace(" Cost:"," <strong>Cost:</strong>").replace(". Time:",". <strong>Time:</strong>")}</li>`).join("")}</ol>`;
   const d=$("#detail"); if(typeof d.showModal==="function") d.showModal(); else d.setAttribute("open","");
 }
 
 /* --- wiring --- */
 function init(board, text){
   rows=board.rows;
-  bandMin=Math.min(...rows.map(r=>Math.log(r.band_lo_usd)));
-  bandMax=Math.max(...rows.map(r=>Math.log(r.band_hi_usd)));
+  bandMin=Math.min(...rows.map(r=>Math.log(r.wide_lo_usd)));
+  bandMax=Math.max(...rows.map(r=>Math.log(r.wide_hi_usd)));
   renderHead(board); seal(board, text);
   const cats=[...new Set(rows.map(r=>r.category).filter(Boolean))].sort();
   $("#cat").innerHTML='<option value="">All categories</option>'+cats.map(c=>`<option>${esc(c)}</option>`).join("");

@@ -225,28 +225,62 @@ function fmtUsd(v: number): string {
   return `$${pyRoundInt(v).toLocaleString('en-US')}`;
 }
 
-/** Six steps per protocol, derived from the row's own data; each carries a cost and a time. */
+/**
+ * A row's farm-plan economics: the working capital (returned on exit, so
+ * not a cost) and the estimated cash cost — gas for the fund, enter, claim
+ * and exit transactions plus $2/week of qualifying-action gas across the
+ * plan's weekly snapshots.
+ */
+function planEconomics(p: Protocol, age: number | null): { capital: number; cash: number } {
+  const chain = p.chains.length > 0 ? p.chains[0]! : 'Ethereum';
+  const gas = gasFor(chain);
+  const weeks = Math.max(1, Math.floor(holdFor(age) / 7));
+  return { capital: capitalFor(p.tvl_usd), cash: 4 * gas + 2 * weeks };
+}
+
+/** Eight steps per protocol, derived from the row's own data; each carries a cost and a time. */
 function farmSteps(p: Protocol, age: number | null): string[] {
   const name = p.name;
   const slug = p.slug;
   const cat = p.category || 'DeFi';
-  const chain = p.chains.length > 0 ? p.chains[0]! : 'Ethereum';
+  const chains = p.chains.length > 0 ? p.chains : ['Ethereum'];
+  const chain = chains[0]!;
   const gas = gasFor(chain);
-  const cap = capitalFor(p.tvl_usd);
+  const { capital: cap, cash } = planEconomics(p, age);
+  const half = Math.floor(cap / 2);
+  const rest = cap - half;
   const hold = holdFor(age);
   const weeks = Math.max(1, Math.floor(hold / 7));
   const { verdict } = verdictFor(p, age);
   const ch = p.change_7d;
   const chTxt = ch === null ? 'n/a' : `${pySignedFixed(ch, 1)}%`;
+  const chAbs = ch === null ? '' : `${pyFixed(Math.abs(ch), 1)}%`;
   const core = CORE_ACTIONS[cat] ?? CORE_DEFAULT;
   const qual = QUAL_ACTIONS[cat] ?? QUAL_DEFAULT;
+  const chainNote = chains.length > 1
+    ? `${name} runs on ${chains.length} chains in the snapshot; keep the whole plan on ${chain}, its first-listed chain, instead of splitting activity across chains.`
+    : `${name} runs only on ${chain} in the snapshot, so there is no chain choice to make.`;
+  const scale = ch === null
+    ? `Scale after 7 days: the snapshot prints no 7-day change for ${name}, so add the second tranche of $${rest} only if its live TVL on DefiLlama is flat or higher than on entry day; if TVL slipped, keep the plan at half size. Cost: $${rest} capital + ~$${gas} gas. Time: 10 min.`
+    : ch >= 0
+      ? `Scale after 7 days: ${name}'s TVL is trending up (${chTxt} over the 7 days in the snapshot), so add the second tranche of $${rest} on schedule - unless the live TVL has reversed by then. Cost: $${rest} capital + ~$${gas} gas. Time: 10 min.`
+      : `Scale with caution: ${name}'s TVL fell ${chAbs} over the 7 days in the snapshot, so add the second tranche of $${rest} only after a flat or positive week on its DefiLlama page; a second falling week cancels the scale-up. Cost: $${rest} capital + ~$${gas} gas. Time: 10 min.`;
+  const agePhrase = age === null
+    ? `has no listing date in the snapshot, so the plan uses the standard ${hold}-day hold`
+    : age < 180
+      ? `was listed only ${age} days before the snapshot - a young protocol, hence the longer ${hold}-day hold`
+      : age < 540
+        ? `was listed ${age} days before the snapshot`
+        : `was listed ${age} days before the snapshot and is well seasoned, hence the shorter ${hold}-day hold`;
   const steps = [
     `Verify ${name} before depositing: open its DefiLlama protocol page (slug '${slug}') and follow only the official app and docs links listed there - never search-engine ads, DMs or look-alike domains. Save the official app URL in your farm log. Cost: $0. Time: 10 min.`,
-    `Fund a fresh, farm-only wallet on ${chain} with about $${gas} of gas money; write the seed phrase on paper offline and never route funds from an account you cannot afford to flag. Cost: ~$${gas} gas. Time: 15 min.`,
-    `${core} on ${chain}, sized at $${cap} of working capital for a protocol with ${fmtUsd(p.tvl_usd)} TVL; start at half size for the first week. Cost: $${cap} capital + ~$${gas} gas. Time: 20 min.`,
+    `Fund a fresh, farm-only wallet on ${chain} with the full $${cap} of working capital plus about $${gas} of gas money; write the seed phrase on paper offline and never route funds from an account you cannot afford to flag. Cost: ~$${gas} gas. Time: 15 min.`,
+    `${core} on ${chain} with only the first tranche of $${half} of the $${cap} plan, against ${fmtUsd(p.tvl_usd)} of TVL. ${chainNote} Cost: $${half} capital + ~$${gas} gas. Time: 20 min.`,
+    scale,
     `Qualify weekly: ${qual}, every week, so the activity appears in at least ${weeks} separate weekly snapshots; log each transaction hash with its date and amount. Cost: ~$2/week in gas. Time: 10 min/week.`,
-    `Hold about ${hold} days and monitor weekly: check ${name}'s points or rewards page and its TVL trend (7d change is now ${chTxt}); a TVL drop over 15% in one week moves this plan to the exit watchlist. Cost: $0. Time: 5 min/week.`,
-    `Exit rule (plan verdict: ${verdict}): withdraw if TVL falls 25% or more within 7 days, if no token or rewards are announced by day ${hold}, or immediately on any official exploit warning - whichever comes first. Claim only inside the official app; never pay anyone to 'unlock' a claim. Cost: ~$${gas} gas. Time: 15 min.`,
+    `Hold about ${hold} days and monitor weekly: ${name} ${agePhrase}; check its points or rewards page and its TVL trend (7d change is now ${chTxt}) and write the points balance into the farm log each week; a TVL drop over 15% in one week moves this plan to the exit watchlist. Cost: $0. Time: 5 min/week.`,
+    `Claim when the token or rewards land: claim only inside the official app you saved in step 1, and re-check the claim page against the official docs before signing - never pay anyone to 'unlock' a claim. Sell enough of the claim to cover this plan's cash costs of about $${cash}; keep the rest as upside. Cost: ~$${gas} gas. Time: 15 min.`,
+    `Exit rule (plan verdict: ${verdict}): withdraw if TVL falls 25% or more within 7 days, if no token or rewards are announced by day ${hold}, or immediately on any official exploit warning - whichever comes first. Then record the plan's net result (claimed value minus about $${cash} of cash costs) in the farm log and rotate the freed $${cap} to the next FARM-verdict protocol on your list. Cost: ~$${gas} gas. Time: 15 min.`,
   ];
   return steps.map((s) => (s.length >= 20 ? s : `${s} Keep records.`));
 }
@@ -359,6 +393,7 @@ export function buildBoard(snap: Snapshot): BoardRow[] {
     const p = m.r.p;
     const age = m.r.age;
     const { verdict, score } = verdictFor(p, age);
+    const econ = planEconomics(p, age);
     const implied = m.implied;
     return {
       rank: i + 1,
@@ -382,6 +417,8 @@ export function buildBoard(snap: Snapshot): BoardRow[] {
       rank_hi: m.rankHi,
       farm_verdict: verdict,
       farm_score: score,
+      farm_cash_cost_usd: econ.cash,
+      farm_capital_usd: econ.capital,
       farm_steps: farmSteps(p, age),
     } as BoardRow;
   });
