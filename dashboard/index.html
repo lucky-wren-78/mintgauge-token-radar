@@ -9,48 +9,60 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand">
-    <h1>Mint<span class="acc">Gauge</span></h1>
-    <p class="tag">Pre-token launch radar — every protocol without a token, priced by a curve fitted on the snapshot's own traded tokens.</p>
+  <div class="brandrow">
+    <div class="brand">
+      <h1>Mint<span class="acc">Gauge</span></h1>
+      <p class="tag">Pre-token launch radar — every protocol without a token, priced two ways: what it would be worth if it launches, times the odds it ever records one. Both models are fitted on the snapshot's own protocols and tested out of sample, in the open, below.</p>
+    </div>
+    <dl class="stats" id="stats"></dl>
   </div>
-  <dl class="stats" id="stats"></dl>
   <p class="seal" id="seal">Verifying page against board.json…</p>
 </header>
 
-<main>
+<main id="boardview">
   <section class="valstrip" aria-label="Out-of-sample validation">
     <div class="valgrid" id="valstrip"></div>
-    <p class="valnote" id="valnote"></p>
   </section>
 
-  <details class="panel" id="method">
-    <summary>How a value is built — model, holdout test, exclusion audit</summary>
-    <div class="method-grid">
-      <section>
-        <h2>The model</h2>
-        <p id="model-text"></p>
-        <div id="scatter" role="img" aria-label="Log-log scatter of traded protocols: market cap against TVL, with the fitted curve"></div>
-      </section>
-      <section>
-        <h2>Out-of-sample test (printed, not promised)</h2>
-        <table class="mini" id="holdout"></table>
-        <p class="note">25 repeated 80/20 holdouts on the 128 traded protocols. A miss of ×3.55 means the typical estimate lands within a factor of 3.55 of the real market cap. The flat multiple is what a single TVL multiplier scores on the same splits.</p>
-        <h2>Why the bands are wide</h2>
-        <p class="note">Each row's band is the interquartile range of cross-fitted model residuals — it includes real residual dispersion, not just parameter wobble. Bootstrap-only bands (about ×2.2 wide) would look tidier and be wrong; the holdout says the honest spread is this one. The wider P10–P90 range is in each protocol's detail view.</p>
-      </section>
-      <section>
-        <h2>From 758 protocols to this board</h2>
-        <table class="mini" id="exclusions"></table>
-        <h2>Category premiums (shrunk toward 1.00)</h2>
-        <div id="premiums" class="premiums"></div>
-      </section>
+  <section class="panel evidence" aria-label="Out-of-sample evidence">
+    <h2 class="ph">Out-of-sample evidence — printed, not promised</h2>
+    <div class="evgrid">
+      <div>
+        <h3>All 758 snapshot protocols, accounted for</h3>
+        <div class="acct" id="acctbar" role="img" aria-label="Stacked bar accounting for all 758 protocols"></div>
+        <div class="acctleg" id="acctleg"></div>
+      </div>
+      <div>
+        <h3>Integrity checks this page runs on itself</h3>
+        <ul class="checks" id="integrity"></ul>
+      </div>
     </div>
-  </details>
+  </section>
+
+  <section class="panel scen" aria-label="Farm scenario">
+    <div class="scenhead">
+      <h2 class="ph">Farm scenario — the board's economics, recomputed live</h2>
+      <p class="note">Expected gross = (plan ÷ TVL) × drop share × implied value, the share of launch value assumed to reach depositors pro-rata. Net subtracts cash costs (gas + $2/wk); net/hour uses hands-on time (85 min + 15 min/wk). T-bill: 4%/yr.</p>
+    </div>
+    <div class="scengrid">
+      <label class="fld grow">Plan size <span class="fval" id="v-size"></span>
+        <input type="range" id="in-size" min="500" max="100000" step="500" value="10000">
+      </label>
+      <label class="fld grow">Drop share <span class="fval" id="v-drop"></span>
+        <input type="range" id="in-drop" min="1" max="25" step="0.5" value="7">
+      </label>
+      <label class="fld grow">Horizon <span class="fval" id="v-weeks"></span>
+        <input type="range" id="in-weeks" min="2" max="26" step="1" value="12">
+      </label>
+      <p class="scenread" id="scenread"></p>
+    </div>
+  </section>
 
   <div class="toolbar" role="search">
     <div class="tabs" role="tablist" aria-label="Board view">
-      <button type="button" role="tab" aria-selected="true" id="tab-pre" data-view="pre">Pre-token board</button>
-      <button type="button" role="tab" aria-selected="false" id="tab-live" data-view="live">Live comps (traded)</button>
+      <button type="button" role="tab" aria-selected="true" data-view="pre">Pre-token board</button>
+      <button type="button" role="tab" aria-selected="false" data-view="live">Live comps (traded)</button>
+      <button type="button" role="tab" aria-selected="false" data-view="method">Method &amp; full evidence</button>
     </div>
     <label class="fld">Search
       <input type="search" id="q" placeholder="protocol, category, chain…" autocomplete="off">
@@ -58,37 +70,80 @@
     <label class="fld">Category
       <select id="cat"><option value="">All categories</option></select>
     </label>
-    <label class="fld">Farm verdict
-      <select id="verd">
-        <option value="">Any verdict</option><option>FARM</option><option>MARGINAL</option><option>SKIP</option>
-      </select>
+    <label class="fld">Chain
+      <select id="chain"><option value="">All chains</option></select>
     </label>
+    <div class="fld">Farm verdict at scenario
+      <div class="vchips" id="vchips" role="group" aria-label="Filter by farm verdict"></div>
+    </div>
     <p class="shown" id="shown" role="status"></p>
   </div>
 
   <div class="tablewrap" role="region" aria-labelledby="boardcap" tabindex="0">
     <table id="board">
-      <caption id="boardcap">Pre-token protocols ranked by implied launch value</caption>
+      <caption id="boardcap">Pre-token protocols ranked by implied launch value (value if it launches × token odds)</caption>
       <thead id="thead"></thead>
       <tbody id="tbody"></tbody>
     </table>
   </div>
+
+  <section class="panel evidence2" aria-label="Ablation table">
+    <h2 class="ph">Every model term, tested — a term stays only if it improves leave-one-out AND walk-forward</h2>
+    <div class="ablwrap"><table class="mini abl" id="ablation"></table></div>
+    <p class="note">Misses are median factors: ×3.71 means the typical estimate lands within a factor of 3.71 of the real market cap. Walk-forward fits only on tokens listed earlier and scores the ones listed later (47 test points) — the protocol that catches terms which merely memorise the present. The full 17-row table, including every rejection, is in the Method &amp; full evidence tab.</p>
+  </section>
+
+  <section id="methodview" hidden>
+    <div class="mgrid">
+      <section class="panel">
+        <h2 class="ph">The value model — size curve with curvature</h2>
+        <p id="model-text"></p>
+        <div id="scatter" role="img" aria-label="Log-log scatter of traded protocols: market cap against TVL, with the fitted curve and its P25-P75 band"></div>
+        <p class="note">Points: the 128 traded protocols the curve is fitted on. Line: the fitted curve; shaded band: the cross-fitted residual P25–P75, the same band every board row carries.</p>
+      </section>
+      <section class="panel">
+        <h2 class="ph">The token-odds model — will it ever record a token?</h2>
+        <div id="oddsev"></div>
+        <h3>Calibration, ten-fold out-of-fold (predicted vs actual token rate)</h3>
+        <div id="deciles"></div>
+        <h3>Which feature groups carry the signal (Brier, ten-fold)</h3>
+        <table class="mini" id="oddsabl"></table>
+      </section>
+      <section class="panel">
+        <h2 class="ph">Band honesty — coverage actually measured</h2>
+        <table class="mini" id="bandcov"></table>
+        <p class="note">The whiskers cover a little less than their 80% claim out of sample (77% leave-one-out, 70% walk-forward). We print the measured coverage instead of quietly widening the bands until the claim holds.</p>
+        <h3>Category premiums (shrunk toward 1.00)</h3>
+        <div id="premiums" class="premiums"></div>
+      </section>
+      <section class="panel">
+        <h2 class="ph">Every term, tested — the full ablation</h2>
+        <div class="ablwrap"><table class="mini abl" id="ablation-full"></table></div>
+        <p class="note">One term at a time on top of the base model, judged on leave-one-out and walk-forward together. Full per-category fits passed both tests on the median but were not adopted: the random holdout worsens (×3.67 vs ×3.55) and the leave-one-out error tail explodes (max ×2,096 vs ×922) — thin categories overfit. The clean-comps fit set owns the best walk-forward (×2.70) and a failing leave-one-out (×3.94); the gate is both tests, so it stays out too.</p>
+      </section>
+      <section class="panel">
+        <h2 class="ph">From 758 protocols to this board</h2>
+        <table class="mini" id="exclusions"></table>
+        <p class="note">House rules from the kit: derivatives (bridge, liquid staking/restaking, wrapped/staked names), centralised exchanges and versioned re-releases are not ranked; the 40-protocol watchlist is ranked in full.</p>
+      </section>
+    </div>
+  </section>
 </main>
 
-<footer>
-  <p>Data: sealed DefiLlama snapshot dated <span id="asof"></span> from the bounty kit. Values are model estimates with stated uncertainty, not predictions. Farm plans are checklists with explicit costs, times and exit rules — not financial advice.</p>
-</footer>
-
-<dialog id="detail" aria-labelledby="d-name" closedby="any">
+<main id="detailview" hidden>
+  <p><button type="button" class="backbtn" id="backbtn">← Back to the board</button></p>
   <div class="d-head">
     <div>
       <h2 id="d-name"></h2>
       <p class="d-sub" id="d-sub"></p>
     </div>
-    <form method="dialog"><button class="close" aria-label="Close detail">×</button></form>
   </div>
   <div class="d-body" id="d-body"></div>
-</dialog>
+</main>
+
+<footer>
+  <p>Data: sealed DefiLlama snapshot dated <span id="asof"></span> from the bounty kit. Values are model estimates with stated uncertainty, not predictions; token odds are a fitted proxy from peer history, not a promise. Farm plans are checklists with explicit costs, times and exit rules — not financial advice.</p>
+</footer>
 
 <script src="model-data.js"></script>
 <script src="app.js"></script>

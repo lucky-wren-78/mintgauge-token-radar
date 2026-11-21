@@ -1,17 +1,40 @@
-// MintGauge's model: the valuation, filter, farm plans and board assembly.
+// MintGauge's model: the valuation, the token odds, the farm plans and the
+// board assembly.
 //
-// A TypeScript port of the validated Python prototype (model/fit-v1.py's
-// variant c2 + entry/build-board.py), reproducing its board byte-for-byte
-// (see lib/compat.ts for the NumPy/CPython pieces that takes). The model:
+// A TypeScript port of the validated Python prototypes (model/fit-v1.py,
+// model/v3-m2-ablation.py, model/v3-m3-odds.py, model/v3-m4-bands.py),
+// reproducing their board (see lib/compat.ts for the NumPy/CPython pieces
+// that takes). Two models, both fitted on the snapshot's own numbers:
 //
-//   implied = exp(intercept + slope * ln TVL) * category premium,
-//   fitted by OLS on the snapshot's traded protocols (mcap > 0, TVL > 0);
-//   each category premium is its mean residual, shrunk by n/(n+10);
-//   a sanity cap holds every implied value at or below TVL times the 90th
-//   percentile of traded comps' mcap/TVL; uncertainty bands are quantiles of
-//   10-fold cross-fitted residuals; rank ranges are percentiles 10-90 of 200
-//   bootstrap refits. Momentum and age were tested as regressors and
-//   rejected by the holdout, so they are not in the model.
+//   VALUE IF IT LAUNCHES — implied by the size curve
+//     log(mcap) = b0 + b1 * ln TVL + b2 * (ln TVL)^2, OLS on the snapshot's
+//     128 traded protocols (mcap > 0, TVL > 0), plus a per-category
+//     intercept: each category's mean residual, shrunk by n/(n+10).
+//     The curvature term is the one addition that improved BOTH new test
+//     protocols (leave-one-out miss x3.71, walk-forward miss x2.91, random
+//     holdout x3.57); momentum, age, chain count, capped multipliers,
+//     Huber, alternate fit sets and full per-category fits were all tested
+//     against the same two protocols and rejected — the dashboard prints
+//     the ablation table. A sanity cap holds every value at or below TVL
+//     times the 90th percentile of traded comps' mcap/TVL. Uncertainty
+//     bands are quantiles of 10-fold cross-fitted residuals; their
+//     held-out coverage is printed on the dashboard (P25-P75 covers 50%
+//     at LOO against a 50% claim; P10-P90 covers 77% against 80%).
+//
+//   TOKEN ODDS — the chance a protocol ever records a token, fitted by a
+//     ridge logit (lambda 2.0, chosen on a grid by ten-fold Brier) on all
+//     758 snapshot protocols: outcome = already tokenised (416) vs
+//     pre-token (342); features = log age without a token, ln TVL, 7-day
+//     growth, log chain count, category. Ten-fold Brier 0.197 against the
+//     base rate's 0.248; walk-forward Brier 0.242 against 0.288;
+//     out-of-fold calibration slope 1.01. The walk-forward calibration
+//     slope is only 0.32 — forward in time the odds run over-confident —
+//     and the dashboard prints that warning next to the odds.
+//
+//   implied_value_usd = value if it launches x token odds, rounded to
+//   whole dollars, strictly decreasing with rank. Rank ranges are
+//   percentiles 10-90 of 200 bootstrap refits of the value model (odds
+//   held at their full-fit values).
 
 import { BitGen, PyFloat, npMean, npPercentile, npQuantile, pyFixed, pyJsonDump, pyRoundInt, pyRoundTo, pySignedFixed } from './compat.ts';
 
@@ -50,6 +73,7 @@ const SHRINK_K = 10.0;
 const BAND_Q: [number, number] = [0.25, 0.75]; // the IQR band on every row
 const WIDE_Q: [number, number] = [0.1, 0.9]; // the wider band in the detail view
 const CAP_PCT = 90; // the cap ratio's percentile of traded comps
+const ODDS_LAMBDA = 2.0; // ridge penalty of the token-odds logit (grid-picked)
 
 // House filter definitions (kit input README): derivative categories, the
 // wrapped/staked/staking name words, and the starter's versioned-name regex.
@@ -80,40 +104,76 @@ function enrich(p: Protocol, asOfMs: number): Enriched {
   return { p, lt: Math.log(p.tvl_usd), lm: p.mcap_usd !== null ? Math.log(p.mcap_usd) : 0, age: ageDays(p, asOfMs) };
 }
 
-// ---------------------------------------------------------------- the fit
-
-/** Closed-form OLS for the two-column design [1, ln TVL] -> ln mcap. */
-function ols2(rows: Enriched[]): [number, number] {
-  const n = rows.length;
-  let sx = 0, sy = 0;
-  for (const r of rows) {
-    sx += r.lt;
-    sy += r.lm;
-  }
-  const mx = sx / n, my = sy / n;
-  let sxy = 0, sxx = 0;
-  for (const r of rows) {
-    const dx = r.lt - mx;
-    sxy += dx * (r.lm - my);
-    sxx += dx * dx;
-  }
-  const slope = sxy / sxx;
-  return [my - slope * mx, slope];
+/** Median of an already-sorted numeric array (statistics.median semantics). */
+function medianSorted(a: number[]): number {
+  const n = a.length;
+  if (n === 0) return 0;
+  const mid = Math.floor(n / 2);
+  return n % 2 === 1 ? a[mid]! : (a[mid - 1]! + a[mid]!) / 2;
 }
 
+// ------------------------------------------------------- linear algebra
+
+/** Solve A x = b by Gaussian elimination with partial pivoting. */
+function solveLinear(A: number[][], b: number[]): number[] {
+  const n = b.length;
+  const M = A.map((row, i) => [...row, b[i]!]);
+  for (let col = 0; col < n; col++) {
+    let piv = col;
+    for (let r = col + 1; r < n; r++) if (Math.abs(M[r]![col]!) > Math.abs(M[piv]![col]!)) piv = r;
+    if (Math.abs(M[piv]![col]!) < 1e-12) throw new Error('singular matrix');
+    if (piv !== col) { const t = M[col]!; M[col] = M[piv]!; M[piv] = t; }
+    const pv = M[col]![col]!;
+    for (let r = col + 1; r < n; r++) {
+      const f = M[r]![col]! / pv;
+      if (f === 0) continue;
+      for (let c = col; c <= n; c++) M[r]![c] = M[r]![c]! - f * M[col]![c]!;
+    }
+  }
+  const x = new Array<number>(n).fill(0);
+  for (let r = n - 1; r >= 0; r--) {
+    let s = M[r]![n]!;
+    for (let c = r + 1; c < n; c++) s -= M[r]![c]! * x[c]!;
+    x[r] = s / M[r]![r]!;
+  }
+  return x;
+}
+
+/** Least squares via the normal equations (designs here are tiny). */
+function olsMulti(X: number[][], y: number[]): number[] {
+  const d = X[0]!.length;
+  const XtX: number[][] = Array.from({ length: d }, () => new Array<number>(d).fill(0));
+  const Xty = new Array<number>(d).fill(0);
+  for (let i = 0; i < X.length; i++) {
+    const xi = X[i]!;
+    for (let j = 0; j < d; j++) {
+      Xty[j] = Xty[j]! + xi[j]! * y[i]!;
+      for (let k = j; k < d; k++) XtX[j]![k] = XtX[j]![k]! + xi[j]! * xi[k]!;
+    }
+  }
+  for (let j = 0; j < d; j++) for (let k = 0; k < j; k++) XtX[j]![k] = XtX[k]![j]!;
+  return solveLinear(XtX, Xty);
+}
+
+// ---------------------------------------------------------------- the fit
+
 interface CatShrinkFit {
-  beta: [number, number];
+  beta: [number, number, number];
   offsets: Map<string, number>;
   predict: (rows: Enriched[]) => number[];
 }
 
-/** Variant c2: global log-log slope + category intercepts shrunk by n/(n+10). */
+/** The value model: global log-log curve with a (ln TVL)^2 curvature term
+ *  plus category intercepts shrunk by n/(n+10) (variant c2 + curvature). */
 function fitCatShrink(train: Enriched[]): CatShrinkFit {
-  const beta = ols2(train);
+  const X = train.map((r) => [1, r.lt, r.lt * r.lt]);
+  const y = train.map((r) => r.lm);
+  const beta = olsMulti(X, y) as [number, number, number];
+  const curve = (lt: number) => beta[0] + beta[1] * lt + beta[2] * lt * lt;
   const byCat = new Map<string, number[]>();
   for (const r of train) {
     if (r.p.category === null) continue;
-    const resid = r.lm - (beta[0] + beta[1] * r.lt);
+    const resid = r.lm - curve(r.lt);
     const list = byCat.get(r.p.category);
     if (list) list.push(resid);
     else byCat.set(r.p.category, [resid]);
@@ -125,11 +185,104 @@ function fitCatShrink(train: Enriched[]): CatShrinkFit {
     offsets,
     predict: (rows) =>
       rows.map((r) => {
-        let v = Math.exp(beta[0] + beta[1] * r.lt);
+        let v = Math.exp(curve(r.lt));
         if (r.p.category !== null && offsets.has(r.p.category)) v *= Math.exp(offsets.get(r.p.category)!);
         return v;
       }),
   };
+}
+
+// ------------------------------------------------------------- token odds
+
+/**
+ * The token-odds logit, fitted on every snapshot protocol. Features, in
+ * order: log1p age without a token (missing listing dates imputed with the
+ * median age), ln TVL, 7-day growth in percent clipped to [-60, 120] and
+ * scaled to a fraction (null counts as 0), log chain count, a missing-age
+ * dummy, then one dummy per category. The continuous block is standardised
+ * on the full population (the missing-age dummy passes through unscaled);
+ * every coefficient except the intercept carries the ridge penalty.
+ */
+function fitOdds(prots: Protocol[], asOfMs: number): Map<string, number> {
+  const cats = [...new Set(prots.map((p) => p.category).filter((c): c is string => c !== null))].sort();
+  const ages = prots.map((p) => ageDays(p, asOfMs));
+  const known = ages.filter((a): a is number => a !== null).sort((a, b) => a - b);
+  const ageMed = medianSorted(known);
+  const NC = 5; // continuous features ahead of the category dummies
+  const raw: number[][] = prots.map((p, i) => {
+    const a = ages[i]!;
+    const missing = a === null ? 1 : 0;
+    const age = a === null ? ageMed : a;
+    const ch = p.change_7d === null ? 0 : Math.max(-60, Math.min(120, p.change_7d)) / 100;
+    const cont = [Math.log1p(Math.max(age, 0)), Math.log(p.tvl_usd), ch, Math.log(Math.max(p.chains.length, 1)), missing];
+    return [...cont, ...cats.map((c) => (p.category === c ? 1 : 0))];
+  });
+  const mu = new Array<number>(NC).fill(0);
+  const sd = new Array<number>(NC).fill(1);
+  for (let j = 0; j < NC; j++) {
+    if (j === 4) { mu[j] = 0; sd[j] = 1; continue; } // the missing-age dummy is not scaled
+    let m = 0;
+    for (const row of raw) m += row[j]!;
+    m /= raw.length;
+    let v = 0;
+    for (const row of raw) v += (row[j]! - m) * (row[j]! - m);
+    mu[j] = m;
+    sd[j] = Math.sqrt(v / raw.length) + 1e-12;
+  }
+  const d = 1 + NC + cats.length;
+  const X: Float64Array[] = raw.map((row) => {
+    const x = new Float64Array(d);
+    x[0] = 1;
+    for (let j = 0; j < NC; j++) x[1 + j] = (row[j]! - mu[j]!) / sd[j]!;
+    for (let j = 0; j < cats.length; j++) x[1 + NC + j] = row[NC + j]!;
+    return x;
+  });
+  const y = prots.map((p) => (isPreToken(p) ? 0 : 1));
+  // Newton / IRLS for the ridge logit.
+  const beta = new Float64Array(d);
+  const pen = new Float64Array(d).fill(ODDS_LAMBDA);
+  pen[0] = 0;
+  const grad = new Float64Array(d);
+  const H: number[][] = Array.from({ length: d }, () => new Array<number>(d).fill(0));
+  for (let iter = 0; iter < 100; iter++) {
+    grad.fill(0);
+    for (const row of H) row.fill(0);
+    for (let i = 0; i < X.length; i++) {
+      const xi = X[i]!;
+      let z = 0;
+      for (let j = 0; j < d; j++) z += xi[j]! * beta[j]!;
+      const zc = Math.max(-35, Math.min(35, z));
+      const pr = 1 / (1 + Math.exp(-zc));
+      const w = pr * (1 - pr) + 1e-9;
+      const res = y[i]! - pr;
+      for (let j = 0; j < d; j++) {
+        grad[j] = grad[j]! + xi[j]! * res;
+        const wxj = w * xi[j]!;
+        for (let k = j; k < d; k++) H[j]![k] = H[j]![k]! + wxj * xi[k]!;
+      }
+    }
+    for (let j = 0; j < d; j++) {
+      grad[j] = grad[j]! - pen[j]! * beta[j]!;
+      H[j]![j] = H[j]![j]! + pen[j]!;
+      for (let k = 0; k < j; k++) H[j]![k] = H[k]![j]!;
+    }
+    const step = solveLinear(H, [...grad]);
+    let maxStep = 0;
+    for (let j = 0; j < d; j++) {
+      beta[j] = beta[j]! + step[j]!;
+      maxStep = Math.max(maxStep, Math.abs(step[j]!));
+    }
+    if (maxStep < 1e-9) break;
+  }
+  const odds = new Map<string, number>();
+  prots.forEach((p, i) => {
+    const xi = X[i]!;
+    let z = 0;
+    for (let j = 0; j < d; j++) z += xi[j]! * beta[j]!;
+    const zc = Math.max(-35, Math.min(35, z));
+    odds.set(p.slug, 1 / (1 + Math.exp(-zc)));
+  });
+  return odds;
 }
 
 // ---------------------------------------------------------------- farm plans
@@ -289,7 +442,7 @@ function farmSteps(p: Protocol, age: number | null): string[] {
 
 export type BoardRow = Record<string, unknown>;
 
-/** Build the ranked board (rows in the prototype's exact field order). */
+/** Build the ranked board: rows ranked by value-if-launches x token odds. */
 export function buildBoard(snap: Snapshot): BoardRow[] {
   const asOfMs = parseDay(snap.as_of);
   const prots = snap.protocols;
@@ -304,11 +457,14 @@ export function buildBoard(snap: Snapshot): BoardRow[] {
   const premiums = new Map<string, number>();
   for (const [cat, off] of fit.offsets) premiums.set(cat, pyRoundTo(Math.exp(off), 4));
 
+  // Token odds for every protocol in the snapshot (full-population fit).
+  const odds = fitOdds(prots, asOfMs);
+
   // Sanity cap from the traded comps' own distribution.
   const compRatios = cal.map((r) => r.p.mcap_usd! / r.p.tvl_usd).sort((a, b) => a - b);
   const capRatio = npPercentile(compRatios, CAP_PCT);
 
-  // Cross-fitted residuals (10-fold) for the uncertainty bands.
+  // Cross-fitted residuals (10-fold) of the value model for the bands.
   const rng = new BitGen(SEED);
   const perm = rng.permutation(cal.length);
   const cfResid: number[] = new Array<number>(cal.length).fill(0);
@@ -332,36 +488,40 @@ export function buildBoard(snap: Snapshot): BoardRow[] {
   const nonCex = nonDeriv.filter((r) => r.p.category !== 'CEX');
   const rankable = nonCex.filter((r) => !VERSIONED.test(r.p.name || ''));
 
-  // Values, cap, order.
+  // Values, cap, odds, order — ranked by value x odds.
   const rawVals = fit.predict(rankable);
   interface Meta {
     r: Enriched;
     curve: number;
     val: number;
     capped: boolean;
+    odds: number;
     implied: number;
     rankLo: number | null;
     rankHi: number | null;
   }
   const metas: Meta[] = rankable.map((r, i) => {
-    const curve = Math.exp(beta[0] + beta[1] * Math.log(r.p.tvl_usd));
+    const curve = Math.exp(beta[0] + beta[1] * r.lt + beta[2] * r.lt * r.lt);
     const capVal = r.p.tvl_usd * capRatio;
     const raw = rawVals[i]!;
-    return { r, curve, val: Math.min(raw, capVal), capped: raw > capVal, implied: 0, rankLo: null, rankHi: null };
+    const val = Math.min(raw, capVal);
+    return { r, curve, val, capped: raw > capVal, odds: odds.get(r.p.slug) ?? 0, implied: 0, rankLo: null, rankHi: null };
   });
-  metas.sort((a, b) => b.val - a.val);
+  metas.sort((a, b) => b.val * b.odds - a.val * a.odds);
 
-  // Round to whole dollars, strictly decreasing (a $1 nudge on a tie).
+  // Round the implied values to whole dollars, strictly decreasing.
   let prev: number | null = null;
   for (const m of metas) {
-    let v = pyRoundInt(m.val);
+    let v = pyRoundInt(m.val * m.odds);
     if (prev !== null && v >= prev) v = prev - 1;
     m.implied = Math.max(v, 1);
     prev = m.implied;
   }
 
-  // Rank ranges from 200 bootstrap refits (parameter uncertainty only).
+  // Rank ranges from 200 bootstrap refits of the value model (parameter
+  // uncertainty only; the odds stay at their full-fit values).
   const boardEnriched = metas.map((m) => m.r);
+  const boardOdds = metas.map((m) => m.odds);
   const rngb = new BitGen(SEED + 1);
   const rankSamples: number[][] = metas.map(() => []);
   for (let b = 0; b < N_BOOT; b++) {
@@ -373,8 +533,9 @@ export function buildBoard(snap: Snapshot): BoardRow[] {
     } catch {
       continue;
     }
-    const order = preds.map((_, i) => i).sort((x, y) => preds[y]! - preds[x]!);
-    const ranks = new Array<number>(preds.length);
+    const scored = preds.map((v, i) => v * boardOdds[i]!);
+    const order = scored.map((_, i) => i).sort((x, y) => scored[y]! - scored[x]!);
+    const ranks = new Array<number>(scored.length);
     order.forEach((rowIdx, k) => {
       ranks[rowIdx] = k + 1;
     });
@@ -388,13 +549,15 @@ export function buildBoard(snap: Snapshot): BoardRow[] {
     }
   });
 
-  // Assemble the rows in the prototype's field order.
+  // Assemble the rows. The uncertainty bands belong to the value estimate,
+  // so they are drawn around value_if_launches_usd, not around the
+  // odds-weighted implied value.
   return metas.map((m, i) => {
     const p = m.r.p;
     const age = m.r.age;
     const { verdict, score } = verdictFor(p, age);
     const econ = planEconomics(p, age);
-    const implied = m.implied;
+    const valueIf = pyRoundInt(m.val);
     return {
       rank: i + 1,
       slug: p.slug,
@@ -405,20 +568,24 @@ export function buildBoard(snap: Snapshot): BoardRow[] {
       change_7d: p.change_7d === null ? null : new PyFloat(p.change_7d),
       age_days: age,
       watchlist: watchlist.has(p.slug),
-      implied_value_usd: implied,
+      implied_value_usd: m.implied,
+      value_if_launches_usd: valueIf,
+      token_odds: new PyFloat(pyRoundTo(m.odds, 4)),
       curve_value_usd: pyRoundInt(m.curve),
       premium_mult: new PyFloat(premiums.get(p.category ?? '') ?? 1.0),
       capped: m.capped,
-      band_lo_usd: pyRoundInt(implied * Math.exp(qLo)),
-      band_hi_usd: pyRoundInt(implied * Math.exp(qHi)),
-      wide_lo_usd: pyRoundInt(implied * Math.exp(qWLo)),
-      wide_hi_usd: pyRoundInt(implied * Math.exp(qWHi)),
+      band_lo_usd: pyRoundInt(valueIf * Math.exp(qLo)),
+      band_hi_usd: pyRoundInt(valueIf * Math.exp(qHi)),
+      wide_lo_usd: pyRoundInt(valueIf * Math.exp(qWLo)),
+      wide_hi_usd: pyRoundInt(valueIf * Math.exp(qWHi)),
       rank_lo: m.rankLo,
       rank_hi: m.rankHi,
       farm_verdict: verdict,
       farm_score: score,
       farm_cash_cost_usd: econ.cash,
       farm_capital_usd: econ.capital,
+      gas_usd: gasFor(p.chains.length > 0 ? p.chains[0]! : 'Ethereum'),
+      hold_days: holdFor(age),
       farm_steps: farmSteps(p, age),
     } as BoardRow;
   });
